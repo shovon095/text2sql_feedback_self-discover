@@ -3,10 +3,9 @@ import argparse
 import json
 import os
 import sqlite3
-import torch
+import subprocess
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
-import subprocess
 
 def new_directory(path):  
     if not os.path.exists(path):  
@@ -147,9 +146,25 @@ def prepare_dataset_for_dolomite(data_path, db_root_path, output_dir):
     for data in eval_data:
         question = data['question']
         db_path = os.path.join(db_root_path, data['db_id'], f"{data['db_id']}.sqlite")
+
+        # Debugging step: Print the db_path
+        print(f"Attempting to open database: {db_path}")
+        
+        # Check if the database file exists
+        if not os.path.exists(db_path):
+            print(f"Error: Database file not found at {db_path}")
+            continue  # Skip to the next item
+        
         schema_prompt = generate_schema_prompt(db_path, num_rows=None)
         prompt = schema_prompt + '\n\n' + question
-        sql = data['sql']  # Assuming 'sql' contains the target SQL query
+        
+        # Check if 'SQL' key exists
+        if 'SQL' in data:
+            sql = data['SQL']  # Correct key for the SQL query
+        else:
+            print(f"Warning: 'SQL' key not found in entry with question: {question}")
+            sql = "NO_SQL_PROVIDED"  # Handle missing SQL keys
+
         train_data.append({"prompt": prompt, "completion": sql})
     
     os.makedirs(output_dir, exist_ok=True)
@@ -161,8 +176,10 @@ def prepare_dataset_for_dolomite(data_path, db_root_path, output_dir):
     return train_data_path
 
 def fine_tune_with_dolomite(train_data_path, model_name_or_path, output_dir):
-    # Clone Dolomite Engine repo
-    subprocess.run(["git", "clone", "https://github.com/ibm-granite/dolomite-engine.git"])
+    # Check if dolomite-engine directory exists
+    if not os.path.exists("dolomite-engine"):
+        # Clone Dolomite Engine repo only if it doesn't exist
+        subprocess.run(["git", "clone", "https://github.com/ibm-granite/dolomite-engine.git"])
     
     # Change directory to dolomite-engine
     os.chdir("dolomite-engine")
@@ -179,11 +196,11 @@ def fine_tune_with_dolomite(train_data_path, model_name_or_path, output_dir):
     with open(config_path, 'w') as file:
         file.write(config)
 
-    # Run the fine-tuning script
-    subprocess.run(["sh", "scripts/finetune.sh", config_path])
+    # Run the fine-tuning script using bash instead of sh
+    subprocess.run(["bash", "scripts/finetune.sh", config_path])
 
-    # Export the fine-tuned model
-    subprocess.run(["sh", "scripts/export.sh", "configs/granite-example/export.yml"])
+    # Export the fine-tuned model using bash
+    subprocess.run(["bash", "scripts/export.sh", "configs/granite-example/export.yml"])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Fine-tune IBM Granite model on BIRD dataset using Dolomite Engine and evaluate on dev data.')
