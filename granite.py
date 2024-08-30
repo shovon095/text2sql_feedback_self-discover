@@ -119,7 +119,7 @@ def collect_response_from_granite(model, tokenizer, db_path_list, question_list,
 
 def decouple_question_schema(datasets, db_root_path):
     question_list, db_path_list, knowledge_list = [], [], []
-    for i, data in datasets:
+    for data in datasets:
         question_list.append(data['question'])
         cur_db_path = os.path.join(db_root_path, data['db_id'], f"{data['db_id']}.sqlite")
         db_path_list.append(cur_db_path)
