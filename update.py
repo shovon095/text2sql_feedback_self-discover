@@ -20,27 +20,23 @@ nlp = spacy.load("en_core_web_sm")
 def new_directory(path):  
     if not os.path.exists(path):  
         os.makedirs(path)  
+        
 def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
     """
-    Read an SQLite file, and return the CREATE commands for each of the tables in the database.
+    Read an sqlite file, and return the CREATE commands for each of the tables in the database.
     """
     asdf = 'database' if bench_root == 'spider' else 'databases'
-    db_path = f'{bench_root}/{asdf}/{db_name}/{db_name}.sqlite'
-    
-    try:
-        with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = cursor.fetchall()
-            
-            schemas = {}
-            for table in tables:
-                # Use parameterized query to avoid SQL injection and ensure correct formatting
-                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table[0],))
-                create_statement = cursor.fetchone()[0]
-                schemas[table[0]] = create_statement
+    with sqlite3.connect(f'file:{bench_root}/{asdf}/{db_name}/{db_name}.sqlite?mode=ro', uri=True) as conn:
+        # conn.text_factory = bytes
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        schemas = {}
+        for table in tables:
+            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='{}';".format(table[0]))
+            schemas[table[0]] = cursor.fetchone()[0]
 
-            return schemas
+        return schemas
 
     except sqlite3.Error as e:
         print(f"Error reading database schemas: {e}")
@@ -410,10 +406,10 @@ def connect_gpt(engine, prompt, max_tokens, temperature, stop):
         result = 'error:{}'.format(e)
     return result
 
-def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None, chain_of_thought='False'):
+def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None):
     openai.api_key = api_key
     response_list = []
-    feedback_results = []
+    feedback_results = {}
 
     for i, question in enumerate(question_list):
         print(f"Processing {i + 1}/{len(question_list)}: {question}")
@@ -429,16 +425,15 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         while attempt < 3 and not is_successful:
             print(f"Attempt {attempt + 1} for question: {question}")
             
-            # Generate the initial prompt, now including chain_of_thought argument
+            # Generate the initial prompt
             cur_prompt = generate_difficulty_based_prompt(
                 db_path=db_path_list[i],
                 question=question,
                 knowledge=knowledge_list[i] if knowledge_list else None,
-                schema=schema_dict,
-                chain_of_thought=chain_of_thought  # Pass the chain_of_thought flag here
+                schema=schema_dict
             )
 
-            # Get the response from GPT API
+            # Get the response from GPT-4 API
             result = connect_gpt(engine=engine, prompt=cur_prompt, max_tokens=256, temperature=0.5, stop=['--', '\n\n', ';', '#'])
             
             if isinstance(result, str):  # If the result is already a string (error handling)
@@ -470,7 +465,8 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         response_list.append(sql)
 
         # Store the feedback results for this question
-        feedback_results[question] = {
+        feedback_results[i] = {
+            "question": question,
             "generated_sql": sql,
             "is_successful": is_successful,
             "attempts": attempt,
