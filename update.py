@@ -401,7 +401,7 @@ def connect_gpt(engine, prompt, max_tokens, temperature, stop):
         result = 'error:{}'.format(e)
     return result
 
-def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None):
+def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None, chain_of_thought='False'):
     openai.api_key = api_key
     response_list = []
     feedback_results = []
@@ -420,15 +420,16 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         while attempt < 3 and not is_successful:
             print(f"Attempt {attempt + 1} for question: {question}")
             
-            # Generate the initial prompt
+            # Generate the initial prompt, now including chain_of_thought argument
             cur_prompt = generate_difficulty_based_prompt(
                 db_path=db_path_list[i],
                 question=question,
                 knowledge=knowledge_list[i] if knowledge_list else None,
-                schema=schema_dict
+                schema=schema_dict,
+                chain_of_thought=chain_of_thought  # Pass the chain_of_thought flag here
             )
 
-            # Get the response from GPT-4 API
+            # Get the response from GPT API
             result = connect_gpt(engine=engine, prompt=cur_prompt, max_tokens=256, temperature=0.5, stop=['--', '\n\n', ';', '#'])
             
             if isinstance(result, str):  # If the result is already a string (error handling)
@@ -468,6 +469,8 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         }
 
     return response_list, feedback_results
+
+
 def save_feedback(feedback_results, feedback_output_path):
     """
     Saves the feedback results to a specified file.
