@@ -213,36 +213,43 @@ Improved SQL query:"""
     return response['choices'][0]['message']['content'].strip()
 
 
-def decouple_question_schema(datasets: List[Dict], db_root_path: str):
-    """
-    Decouples the dataset into question_list, db_path_list, and knowledge_list for easier handling.
-    """
+def question_package(data_json, knowledge=False):
+    question_list = []
+    for data in data_json:
+        question_list.append(data['question'])
+
+    return question_list
+
+def knowledge_package(data_json, knowledge=False):
+    knowledge_list = []
+    for data in data_json:
+        knowledge_list.append(data['evidence'])
+
+    return knowledge_list
+
+def decouple_question_schema(datasets, db_root_path):
     question_list = []
     db_path_list = []
     knowledge_list = []
-    
-    for data in datasets:
+    difficulty_list = [] #Use this when you will need difficulty based adaptive prompting
+    for i, data in enumerate(datasets):
         question_list.append(data['question'])
-        db_path_list.append(f"{db_root_path}/{data['db_id']}/{data['db_id']}.sqlite")
-        knowledge_list.append(data.get('evidence', None))
+        cur_db_path = db_root_path + data['db_id'] + '/' + data['db_id'] +'.sqlite'
+        db_path_list.append(cur_db_path)
+        knowledge_list.append(data['evidence'])
+        difficulty_list.append(data['difficulty'])
     
-    return question_list, db_path_list, knowledge_list
+    return question_list, db_path_list, knowledge_list, difficulty_list
 
-def generate_sql_file(sql_lst: List[str], output_path: str):
-    """
-    Saves the list of generated SQL queries to a JSON file.
-    """
-    result = {i: sql for i, sql in enumerate(sql_lst)}
-    
-    directory_path = os.path.dirname(output_path)
-    if not os.path.exists(directory_path):
-        os.makedirs(directory_path)
-    
-    with open(output_path, 'w') as json_file:
-        json.dump(result, json_file, indent=4)
-
-
-
+def generate_sql_file(sql_lst, output_path=None):
+    result = {}
+    for i, sql in enumerate(sql_lst):
+        result[i] = sql
+    if output_path:
+        directory_path = os.path.dirname(output_path)
+        new_directory(directory_path)
+        json.dump(result, open(output_path, 'w'), indent=4)
+    return result
 
 def generate_comment_prompt(question, knowledge=None):
     """
