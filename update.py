@@ -467,7 +467,16 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         }
 
     return response_list, feedback_results
-
+def save_feedback(feedback_results, feedback_output_path):
+    """
+    Saves the feedback results to a specified file.
+    """
+    if feedback_output_path:
+        directory_path = os.path.dirname(feedback_output_path)
+        if not os.path.exists(directory_path):
+            os.makedirs(directory_path)
+        with open(feedback_output_path, 'w') as json_file:
+            json.dump(feedback_results, json_file, indent=4)
 
 if __name__ == '__main__':
     # Argument parsing
@@ -479,6 +488,7 @@ if __name__ == '__main__':
     args_parser.add_argument('--api_key', type=str, required=True)
     args_parser.add_argument('--engine', type=str, required=True, default='code-davinci-002')
     args_parser.add_argument('--data_output_path', type=str)
+    args_parser.add_argument('--feedback_output_path', type=str, help="Path to store feedback output", default=None)
     args = args_parser.parse_args()
 
     # Load evaluation data
@@ -489,13 +499,15 @@ if __name__ == '__main__':
 
     # Collect responses from GPT
     if args.use_knowledge == 'True':
-        responses = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine, knowledge_list=knowledge_list)
+        responses, feedback_results = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine, knowledge_list=knowledge_list)
     else:
-        responses = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine)
+        responses, feedback_results = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine)
 
     # Save SQL queries
     output_name = args.data_output_path + 'predict_' + args.mode + '.json'
     generate_sql_file(sql_lst=responses, output_path=output_name)
 
-    print(f'Successfully collected results from {args.engine} for {args.mode} evaluation.')
+    # Save feedback results if feedback_output_path is provided
+    save_feedback(feedback_results, args.feedback_output_path)
 
+    print(f'Successfully collected results from {args.engine} for {args.mode} evaluation.')
