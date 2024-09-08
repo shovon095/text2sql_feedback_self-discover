@@ -324,7 +324,7 @@ def create_attention_mask(schema: Dict[str, str], relevant_tables: List[str], re
     return attention_mask_str
 
 
-def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficulty='simple', attempts_history=[], schema=None):
+def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficulty='simple', attempts_history=[], schema=None, chain_of_thought='False'):
     """
     Generates a prompt based on the difficulty level of the question, incorporating schema details,
     external knowledge, and specific guidance for handling the question based on its difficulty.
@@ -338,7 +338,7 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     for idx, attempt in enumerate(attempts_history, start=1):
         history_summary += f"Attempt {idx}: Generated SQL: {attempt['generated_sql']}, Success: {attempt['is_successful']}\n"
 
-    cot_prompt = cot_wizard()
+    cot_prompt = cot_wizard() if chain_of_thought == 'True' else ""  # Include chain-of-thought prompting only if enabled
 
     if difficulty == 'simple':
         detailed_steps = detailed_self_discovery_guide()
@@ -359,7 +359,7 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     prompt = (
         f"{schema}\n\n"
         f"{comment_prompt}\n\n"
-        f"{cot_prompt}\n\n"
+        f"{cot_prompt}\n\n"  # Chain-of-thought section (included if enabled)
         f"{detailed_steps}\n"
         f"{history_summary}\n"
         f"{attention_mask}\n\n"
@@ -367,6 +367,7 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     )
 
     return prompt
+
 
 
 
@@ -489,6 +490,8 @@ if __name__ == '__main__':
     args_parser.add_argument('--engine', type=str, required=True, default='code-davinci-002')
     args_parser.add_argument('--data_output_path', type=str)
     args_parser.add_argument('--feedback_output_path', type=str, help="Path to store feedback output", default=None)
+    args_parser.add_argument('--chain_of_thought', type=str, default='False', help="Enable chain-of-thought prompting (True/False)")  # New argument
+
     args = args_parser.parse_args()
 
     # Load evaluation data
@@ -499,9 +502,22 @@ if __name__ == '__main__':
 
     # Collect responses from GPT
     if args.use_knowledge == 'True':
-        responses, feedback_results = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine, knowledge_list=knowledge_list)
+        responses, feedback_results = collect_response_from_gpt_with_retry(
+            db_path_list=db_path_list, 
+            question_list=question_list, 
+            api_key=args.api_key, 
+            engine=args.engine, 
+            knowledge_list=knowledge_list,
+            chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
+        )
     else:
-        responses, feedback_results = collect_response_from_gpt_with_retry(db_path_list=db_path_list, question_list=question_list, api_key=args.api_key, engine=args.engine)
+        responses, feedback_results = collect_response_from_gpt_with_retry(
+            db_path_list=db_path_list, 
+            question_list=question_list, 
+            api_key=args.api_key, 
+            engine=args.engine, 
+            chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
+        )
 
     # Save SQL queries
     output_name = args.data_output_path + 'predict_' + args.mode + '.json'
@@ -511,3 +527,4 @@ if __name__ == '__main__':
     save_feedback(feedback_results, args.feedback_output_path)
 
     print(f'Successfully collected results from {args.engine} for {args.mode} evaluation.')
+
