@@ -421,7 +421,7 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         print(f"Processing {i + 1}/{len(question_list)}: {question}")
 
         # Extract schema as a dictionary
-        schema_dict = get_db_schemas(args.db_root_path, db_path_list[i])
+        schema_dict = get_db_schemas(db_path_list[i])  # Pass only db_path_list[i]
 
         # Initial prompt and query generation
         attempts_history = []
