@@ -20,24 +20,31 @@ nlp = spacy.load("en_core_web_sm")
 def new_directory(path):  
     if not os.path.exists(path):  
         os.makedirs(path)  
-
-
 def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
     """
-    Read an sqlite file, and return the CREATE commands for each of the tables in the database.
+    Read an SQLite file, and return the CREATE commands for each of the tables in the database.
     """
     asdf = 'database' if bench_root == 'spider' else 'databases'
-    with sqlite3.connect(f'file:{bench_root}/{asdf}/{db_name}/{db_name}.sqlite?mode=ro', uri=True) as conn:
-        # conn.text_factory = bytes
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = cursor.fetchall()
-        schemas = {}
-        for table in tables:
-            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='{}';".format(table[0]))
-            schemas[table[0]] = cursor.fetchone()[0]
+    db_path = f'{bench_root}/{asdf}/{db_name}/{db_name}.sqlite'
+    
+    try:
+        with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = cursor.fetchall()
+            
+            schemas = {}
+            for table in tables:
+                # Use parameterized query to avoid SQL injection and ensure correct formatting
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table[0],))
+                create_statement = cursor.fetchone()[0]
+                schemas[table[0]] = create_statement
 
-        return schemas
+            return schemas
+
+    except sqlite3.Error as e:
+        print(f"Error reading database schemas: {e}")
+        return {}
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
