@@ -117,6 +117,16 @@ def nice_look_table(column_names: list, values: list):
     final_output = header + '\n' + rows
     return final_output
 
+def escape_column_name(column_name: str) -> str:
+    """
+    Escapes column names with backticks or double quotes for SQLite.
+    """
+    print(f"Escaping column: {column_name}")  # Add logging
+    if not column_name.startswith('`') and not column_name.endswith('`'):
+        return f'`{column_name}`'
+    return column_name
+
+
 def execute_and_validate_query(db_path: str, sql_query: str, question: str) -> Dict[str, Any]:
     """
     Executes the generated SQL query and validates its correctness based on the number of results,
@@ -180,9 +190,6 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
     return "\n".join(feedback)
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict]) -> str:
-    """
-    Regenerates the SQL query with feedback provided using GPT-4.
-    """
     schema = generate_schema_prompt(db_path)
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
 
@@ -209,7 +216,16 @@ Improved SQL query:"""
         temperature=0.3
     )
     
-    return response['choices'][0]['message']['content'].strip()
+    generated_sql = response['choices'][0]['message']['content'].strip()
+
+    # Escape column names in the generated SQL
+    # Assuming column names are available in schema and we know the columns to escape
+    columns_to_escape = ["Percent (%) Eligible Free (K-12)", "County Name"]
+    for column in columns_to_escape:
+        generated_sql = generated_sql.replace(column, escape_column_name(column))
+    
+    return generated_sql
+
 
 
 def question_package(data_json, knowledge=False):
@@ -541,4 +557,3 @@ if __name__ == '__main__':
     save_feedback(feedback_results, args.feedback_output_path)
 
     print(f'Successfully collected results from {args.engine} for {args.mode} evaluation.')
-
