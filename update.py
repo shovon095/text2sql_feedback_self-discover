@@ -177,10 +177,10 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict]) -> str:
     """
-    Regenerates the SQL query with feedback provided.
+    Regenerates the SQL query with feedback provided using GPT-4.
     """
     schema = generate_schema_prompt(db_path)
-    prompt = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
+    prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
 
 Question: {question}
 
@@ -195,14 +195,18 @@ Attempts history:
 
 Improved SQL query:"""
 
-    response = openai.Completion.create(
-        engine="text-davinci-002",
-        prompt=prompt,
+    response = openai.ChatCompletion.create(
+        model="gpt-4",  # Change to GPT-4 model
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that generates SQL queries."},
+            {"role": "user", "content": prompt_content}
+        ],
         max_tokens=200,
         temperature=0.3
     )
     
-    return response.choices[0].text.strip()
+    return response['choices'][0]['message']['content'].strip()
+
 
 def decouple_question_schema(datasets: List[Dict], db_root_path: str):
     """
