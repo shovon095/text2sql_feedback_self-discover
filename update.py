@@ -28,6 +28,7 @@ def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
     """
     asdf = 'database' if bench_root == 'spider' else 'databases'
     with sqlite3.connect(f'file:{bench_root}/{asdf}/{db_name}/{db_name}.sqlite?mode=ro', uri=True) as conn:
+        # conn.text_factory = bytes
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
@@ -35,6 +36,7 @@ def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
         for table in tables:
             cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='{}';".format(table[0]))
             schemas[table[0]] = cursor.fetchone()[0]
+
         return schemas
 
 
