@@ -22,15 +22,16 @@ def new_directory(path):
         os.makedirs(path)  
         
 def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
+    """
+    Read an sqlite file, and return the CREATE commands for each of the tables in the database.
+    """
     asdf = 'database' if bench_root == 'spider' else 'databases'
-    db_path = os.path.join(bench_root, asdf, db_name, db_name + '.sqlite')
+    db_path = f'{bench_root}/{db_name}/{db_name}.sqlite'  # Fixed path construction
+    print(f"Trying to open database at: {db_path}")  # Debugging the file path
     
-    # Check if the file exists before attempting to connect
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"Database file does not exist: {db_path}")
-    
-    print(f"Opening database at: {db_path}")  # Debugging statement
-    
+
     with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -39,7 +40,9 @@ def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
         for table in tables:
             cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table[0]}'")
             schemas[table[0]] = cursor.fetchone()[0]
-        return schemas
+        
+    return schemas
+
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
@@ -521,7 +524,7 @@ if __name__ == '__main__':
             api_key=args.api_key, 
             engine=args.engine, 
             knowledge_list=knowledge_list,
-            chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
+            #chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
         )
     else:
         responses, feedback_results = collect_response_from_gpt_with_retry(
@@ -529,7 +532,7 @@ if __name__ == '__main__':
             question_list=question_list, 
             api_key=args.api_key, 
             engine=args.engine, 
-            chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
+            #chain_of_thought=args.chain_of_thought  # Pass chain-of-thought argument
         )
 
     # Save SQL queries
