@@ -22,25 +22,24 @@ def new_directory(path):
         os.makedirs(path)  
         
 def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
-    """
-    Read an sqlite file, and return the CREATE commands for each of the tables in the database.
-    """
     asdf = 'database' if bench_root == 'spider' else 'databases'
-    with sqlite3.connect(f'file:{bench_root}/{asdf}/{db_name}/{db_name}.sqlite?mode=ro', uri=True) as conn:
-        # conn.text_factory = bytes
+    db_path = os.path.join(bench_root, asdf, db_name, db_name + '.sqlite')
+    
+    # Check if the file exists before attempting to connect
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Database file does not exist: {db_path}")
+    
+    print(f"Opening database at: {db_path}")  # Debugging statement
+    
+    with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
         schemas = {}
         for table in tables:
-            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='{}';".format(table[0]))
+            cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table[0]}'")
             schemas[table[0]] = cursor.fetchone()[0]
-
         return schemas
-
-    except sqlite3.Error as e:
-        print(f"Error reading database schemas: {e}")
-        return {}
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
@@ -231,15 +230,14 @@ def decouple_question_schema(datasets, db_root_path):
     question_list = []
     db_path_list = []
     knowledge_list = []
-    difficulty_list = [] #Use this when you will need difficulty based adaptive prompting
     for i, data in enumerate(datasets):
         question_list.append(data['question'])
-        cur_db_path = db_root_path + data['db_id'] + '/' + data['db_id'] +'.sqlite'
+        cur_db_path = db_root_path + data['db_id'] + '/' + data['db_id'] + '.sqlite'
         db_path_list.append(cur_db_path)
         knowledge_list.append(data['evidence'])
-        difficulty_list.append(data['difficulty'])
     
-    return question_list, db_path_list, knowledge_list, difficulty_list
+    return question_list, db_path_list, knowledge_list
+
 
 def generate_sql_file(sql_lst, output_path=None):
     result = {}
