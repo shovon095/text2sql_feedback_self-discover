@@ -21,9 +21,10 @@ def new_directory(path):
     if not os.path.exists(path):  
         os.makedirs(path)  
         
-def get_db_schemas(db_path: str) -> Dict[str, str]:
+def get_db_schemas(db_path: str) -> Dict[str, Any]:
     """
-    Read an sqlite file, and return the CREATE commands for each of the tables in the database.
+    Read an sqlite file, and return the CREATE commands for each of the tables in the database
+    as well as the list of columns in each table.
     """
     print(f"Trying to open database at: {db_path}")  # Debugging the file path
     
@@ -35,11 +36,17 @@ def get_db_schemas(db_path: str) -> Dict[str, str]:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
         schemas = {}
+        all_columns = {}
         for table in tables:
             cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table[0]}'")
             schemas[table[0]] = cursor.fetchone()[0]
+            # Get columns for the table
+            cursor.execute(f"PRAGMA table_info({table[0]})")
+            columns = cursor.fetchall()
+            all_columns[table[0]] = [col[1] for col in columns]  # Extract column names from pragma info
         
-    return schemas
+    return schemas, all_columns
+
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
@@ -119,12 +126,12 @@ def nice_look_table(column_names: list, values: list):
 
 def escape_column_name(column_name: str) -> str:
     """
-    Escapes column names with backticks or double quotes for SQLite.
+    Escapes column names with single backticks for SQLite.
     """
-    print(f"Escaping column: {column_name}")  # Add logging
     if not column_name.startswith('`') and not column_name.endswith('`'):
-        return f'`{column_name}`'
+        return f'`{column_name}`'  # Ensure single backticks are used
     return column_name
+
 
 
 def execute_and_validate_query(db_path: str, sql_query: str, question: str) -> Dict[str, Any]:
@@ -190,7 +197,7 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
     return "\n".join(feedback)
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict]) -> str:
-    schema = generate_schema_prompt(db_path)
+    schema, all_columns = get_db_schemas(db_path)
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
 
 Question: {question}
@@ -207,7 +214,7 @@ Attempts history:
 Improved SQL query:"""
 
     response = openai.ChatCompletion.create(
-        model="gpt-4",  # Change to GPT-4 model
+        model="gpt-4",
         messages=[
             {"role": "system", "content": "You are a helpful assistant that generates SQL queries."},
             {"role": "user", "content": prompt_content}
@@ -218,11 +225,11 @@ Improved SQL query:"""
     
     generated_sql = response['choices'][0]['message']['content'].strip()
 
-    # Escape column names in the generated SQL
-    # Assuming column names are available in schema and we know the columns to escape
-    columns_to_escape = ["Percent (%) Eligible Free (K-12)", "County Name"]
-    for column in columns_to_escape:
-        generated_sql = generated_sql.replace(column, escape_column_name(column))
+    # Properly escape all column names dynamically
+    for table, columns in all_columns.items():
+        for column in columns:
+            # Escape each column name in the generated SQL
+            generated_sql = generated_sql.replace(column, escape_column_name(column))
     
     return generated_sql
 
