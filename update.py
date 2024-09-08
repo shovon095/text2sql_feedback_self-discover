@@ -235,11 +235,12 @@ def decouple_question_schema(datasets, db_root_path):
     knowledge_list = []
     for i, data in enumerate(datasets):
         question_list.append(data['question'])
-        cur_db_path = db_root_path + data['db_id'] + '/' + data['db_id'] + '.sqlite'
+        cur_db_path = f"{db_root_path}/{data['db_id']}/{data['db_id']}.sqlite"  # Adjusted here
         db_path_list.append(cur_db_path)
         knowledge_list.append(data['evidence'])
     
     return question_list, db_path_list, knowledge_list
+
 
 
 def generate_sql_file(sql_lst, output_path=None):
