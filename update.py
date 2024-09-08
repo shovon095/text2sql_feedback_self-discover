@@ -21,12 +21,10 @@ def new_directory(path):
     if not os.path.exists(path):  
         os.makedirs(path)  
         
-def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
+def get_db_schemas(db_path: str) -> Dict[str, str]:
     """
     Read an sqlite file, and return the CREATE commands for each of the tables in the database.
     """
-    asdf = 'database' if bench_root == 'spider' else 'databases'
-    db_path = f'{bench_root}/{db_name}/{db_name}.sqlite'  # Fixed path construction
     print(f"Trying to open database at: {db_path}")  # Debugging the file path
     
     if not os.path.exists(db_path):
@@ -42,7 +40,6 @@ def get_db_schemas(bench_root: str, db_name: str) -> Dict[str, str]:
             schemas[table[0]] = cursor.fetchone()[0]
         
     return schemas
-
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
