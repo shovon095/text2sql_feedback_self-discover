@@ -3,7 +3,7 @@ import argparse
 import json
 import os
 import sqlite3
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 import openai
 import backoff
 import sqlparse
@@ -238,25 +238,31 @@ def escape_column_name(column_name: str) -> str:
     Escapes column names with double quotes for SQLite.
     Double quotes are used as they are the SQL standard for identifier quoting.
     """
-    if not column_name.startswith('"') and not column_name.endswith('"'):
+    # Check if the column is already escaped (either with double quotes or backticks)
+    if not (column_name.startswith('"') and column_name.endswith('"')) and not (column_name.startswith('`') and column_name.endswith('`')):
         return f'"{column_name}"'
     return column_name
 
-
 def escape_all_column_names(sql_query: str, all_columns: Dict[str, List[str]]) -> str:
     """
-    Escapes all column names in the given SQL query.
+    Escapes all column names in the given SQL query using exact matching.
     
     :param sql_query: The SQL query string
     :param all_columns: A dictionary where keys are table names and values are lists of column names
     :return: The SQL query with all column names properly escaped
     """
-    for table, columns in all_columns.items():
-        for column in columns:
-            # Escape the column name only if it's not already escaped
-            if f'"{column}"' not in sql_query and f'`{column}`' not in sql_query:
-                sql_query = sql_query.replace(column, escape_column_name(column))
-    return sql_query
+    # Tokenize the query by splitting on spaces and punctuation to avoid partial matches
+    words = re.split(r'(\W+)', sql_query)  # Split by non-word characters while keeping them in the result
+
+    # Flatten the list of all column names from all tables
+    column_names = {col for columns in all_columns.values() for col in columns}
+
+    # Escape the column names that are in the list of columns
+    escaped_words = [escape_column_name(word) if word in column_names else word for word in words]
+
+    # Rejoin the tokenized query back into a single string
+    return ''.join(escaped_words)
+
 
 def is_valid_sql(sql_query):
     try:
@@ -474,7 +480,7 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     entities, relationships = extract_entities_and_relationships(question)
 
     # Map entities to schema elements
-    relevant_tables, relevant_columns, attention_weights = map_entities_to_schema(entities, schema_dict)
+    relevant_tables, relevant_columns, attention_weights = map_entities_to_schema(entities, relationships, schema_dict)
 
     # Generate schema prompt
     schema = generate_schema_prompt(db_path, relevant_tables, relevant_columns, attention_weights)
