@@ -258,12 +258,19 @@ def escape_all_column_names(sql_query: str, all_columns: Dict[str, List[str]]) -
                 sql_query = sql_query.replace(column, escape_column_name(column))
     return sql_query
 
+def is_valid_sql(sql_query):
+    try:
+        parsed = sqlparse.parse(sql_query)
+        return len(parsed) > 0 and parsed[0].get_type() == 'SELECT'
+    except:
+        return False
 
 def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
-    """
-    Executes the generated SQL query and validates its correctness based on the number of results,
-    potential issues, and comparison with expected results.
-    """
+    if not is_valid_sql(sql_query):
+        return {
+            "execution_success": False,
+            "error_message": "Invalid SQL syntax"
+        }
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -507,16 +514,21 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
 @backoff.on_exception(backoff.expo, openai.error.RateLimitError)
 
 def connect_gpt(engine, prompt, max_tokens, temperature, stop):
-    #print("Prompt to GPT:")
-    #print(prompt)
-    #print("-" * 50)
-
     client = openai.ChatCompletion()
     try:
-        result = client.create( model=engine, max_tokens=max_tokens, messages=[{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": prompt}],temperature=temperature, stop=stop)
+        result = client.create(
+            model=engine,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature,
+            stop=stop
+        )
+        return result['choices'][0]['message']['content'].strip()
     except Exception as e:
-        result = 'error:{}'.format(e)
-    return result
+        return f'error:{e}'
 
 
 def calculate_confidence(validation_result: Dict[str, Any]) -> float:
@@ -567,8 +579,8 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         attempts_history = []
         attempt = 0
         is_successful = False
-        best_confidence_score = 0.0  # Track the best confidence score
-        best_sql_query = None  # Track the best SQL query
+        best_confidence_score = 0.0
+        best_sql_query = None
 
         while attempt < 3 and not is_successful:
             print(f"Attempt {attempt + 1} for question: {question}")
@@ -582,18 +594,29 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             )
 
             # Get the response from GPT-4 API
-            result = connect_gpt(engine=engine, prompt=cur_prompt, max_tokens=256, temperature=0.5, stop=['--', '\n\n', ';', '#'])
+            result = connect_gpt(engine=engine, prompt=cur_prompt, max_tokens=256, temperature=0.5, stop=[';'])
 
-            if isinstance(result, str):  # If the result is already a string (error handling)
-                sql = result
-            else:
-                sql = 'SELECT ' + result['choices'][0]['message']['content'].strip()
+            # Ensure the result is a valid SQL query
+            sql = result.strip()
+            if not sql.upper().startswith('SELECT'):
+                sql = f'SELECT {sql}'
 
             # Validate the SQL query by executing it
             validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
 
             # Calculate confidence score
             confidence_score = calculate_confidence(validation_result)
+
+            # Generate feedback if the query was not successful
+            if not validation_result["execution_success"]:
+                feedback = generate_feedback_from_validation(validation_result)
+                
+                # Attempt to regenerate the SQL query with feedback
+                sql = regenerate_sql_with_feedback(question, db_path_list[i], feedback, attempts_history, all_columns)
+                
+                # Validate the regenerated query
+                validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
+                confidence_score = calculate_confidence(validation_result)
 
             # Save the attempt details in the history
             attempts_history.append({
@@ -609,7 +632,7 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
                 best_sql_query = sql
 
             # Check if the query is successful and meets the confidence threshold
-            if confidence_score >= 0.7:  # Example threshold
+            if validation_result["execution_success"] and confidence_score >= 0.7:
                 is_successful = True
 
             attempt += 1
@@ -623,11 +646,10 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             "best_sql_query": best_sql_query,
             "best_confidence_score": best_confidence_score,
             "attempts": attempt,
-            "feedback_history": attempts_history  # Including the feedback for each attempt
+            "feedback_history": attempts_history
         }
 
     return response_list, feedback_results
-
 
 
 def save_feedback(feedback_results, feedback_output_path):
