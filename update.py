@@ -364,6 +364,7 @@ def escape_all_column_names(sql_query: str, all_columns: Dict[str, List[str]]) -
     escaped_sql_query = ''.join(escaped_tokens)
     return escaped_sql_query
 
+
 def is_valid_sql(sql_query):
     try:
         parsed = sqlparse.parse(sql_query)
@@ -373,6 +374,7 @@ def is_valid_sql(sql_query):
             return False, "SQL query does not start with a valid SELECT statement."
     except Exception as e:
         return False, str(e)  # Return the exception message as the error
+
 
 def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
     try:
@@ -399,25 +401,16 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         results = execute_with_adaptive_timeout(cursor, escaped_sql_query)
         print("SQL query executed successfully")
         
-        # Check if results are None
         if results is None:
             return {
                 "execution_success": False,
-                "error_message": "SQL query returned no results. This might be due to an empty table or overly restrictive WHERE clause."
-            }
-        
-        # Check if cursor.description is None
-        if cursor.description is None:
-            return {
-                "execution_success": False,
-                "error_message": "SQL query returned no column information. This might indicate a DDL or DML statement instead of a SELECT query."
+                "error_message": "SQL query returned no results."
             }
         
         # Get column names from the query result
         column_names = [description[0] for description in cursor.description]
         
-        # Build the validation result dictionary
-        validation_result = {
+        return {
             "execution_success": True,
             "row_count": len(results),
             "column_count": len(column_names),
@@ -425,21 +418,6 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
             "column_names": column_names,
             "potential_issues": []
         }
-        
-        # Perform additional checks
-        if len(results) == 0:
-            validation_result["potential_issues"].append("Query returned no results. Please verify the conditions in the WHERE clause and ensure data exists for the specified criteria.")
-        
-        if len(results) > 1000:
-            validation_result["potential_issues"].append(f"Query returned an unusually large number of rows ({len(results)}). Consider adding more specific filters or a LIMIT clause.")
-        
-        if results and all(len(set(row)) == 1 for row in results):
-            validation_result["potential_issues"].append("All columns have the same value. This might indicate a JOIN issue or incorrect column selection.")
-        
-        # Calculate confidence score
-        validation_result["confidence_score"] = calculate_confidence(validation_result, analysis_result)
-        
-        return validation_result
 
     except sqlite3.Error as e:
         print(f"SQLite error occurred: {e}")
@@ -448,16 +426,10 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
             "error_message": f"SQLite Error: {str(e)}",
             "potential_issues": [f"SQLite Error: {str(e)}"]
         }
-    except Exception as e:
-        print(f"Execution error occurred: {e}")
-        return {
-            "execution_success": False,
-            "error_message": f"Execution Error: {str(e)}",
-            "potential_issues": [f"Execution Error: {str(e)}"]
-        }
     finally:
         if conn:
             conn.close()
+
 
 
 def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
@@ -480,28 +452,28 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
 
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict], all_columns: Dict[str, List[str]]) -> str:
-    # Use schema cache
     schema, _ = schema_cache.get_or_fetch_schema(db_path)
 
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
 
-Question: {question}
+    Question: {question}
 
-Schema:
-{schema}
+    Schema:
+    {schema}
 
-Previous attempt feedback:
-{feedback}
+    Previous attempt feedback:
+    {feedback}
 
-Attempts history:
-{attempts_history}
+    Attempts history:
+    {attempts_history}
 
-Improved SQL query:"""
+    Improved SQL query (no explanations or formatting):
+    """
 
     response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations or comments."},
+            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations."},
             {"role": "user", "content": prompt_content}
         ],
         max_tokens=200,
@@ -688,23 +660,24 @@ def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dic
     
     # Execution success increases confidence
     if validation_result["execution_success"]:
-        confidence += 0.5
-        
-        # Row count feedback
-        row_count = validation_result["row_count"]
-        if 1 <= row_count <= 1000:
-            confidence += 0.3
-        elif row_count > 1000:
-            confidence -= 0.2
-        
-        # No issues in query analysis
-        if analysis_result["is_valid"]:
-            confidence += 0.2
-        
-        # Reduce confidence for each potential issue
-        confidence -= 0.1 * len(validation_result["potential_issues"])
+        confidence += 0.6  # Execution success provides the highest boost
+    
+    # Row count feedback
+    row_count = validation_result["row_count"]
+    if 1 <= row_count <= 1000:
+        confidence += 0.2
+    elif row_count > 1000:
+        confidence -= 0.1
+    
+    # No issues in query analysis
+    if analysis_result["is_valid"]:
+        confidence += 0.2
+    
+    # Reduce confidence for each potential issue
+    confidence -= 0.05 * len(validation_result["potential_issues"])  # Reduce confidence gradually
     
     return max(0.0, min(confidence, 1.0))
+
 
 
 def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None):
