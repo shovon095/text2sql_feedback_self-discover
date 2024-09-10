@@ -149,21 +149,15 @@ def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str
     issues = []
     parsed = sqlparse.parse(sql_query)[0]
     
-    # Check if it's a SELECT query
-    if parsed.get_type() != 'SELECT':
-        issues.append("Query is not a SELECT statement")
-    
-    # Extract column and table identifiers
     used_columns = extract_identifiers(parsed.tokens)
-    
-    # Check for existence of columns and tables
+
+    # Check each used column against the actual schema
     for col in used_columns:
         if '.' in col:
             table, column = col.split('.')
             if table not in all_columns or column not in all_columns[table]:
                 issues.append(f"Column {col} not found in schema")
         else:
-            # If the column isn't part of a table.column format, check all columns
             found = False
             for table, columns in all_columns.items():
                 if col in columns:
@@ -176,6 +170,7 @@ def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str
         "is_valid": len(issues) == 0,
         "issues": issues
     }
+
 
 def execute_with_adaptive_timeout(cursor, query, initial_timeout=5, max_timeout=30):
     timeout = initial_timeout
@@ -198,6 +193,7 @@ def escape_sql_identifier(identifier: str) -> str:
     This prevents issues when reserved keywords are used as identifiers.
     """
     return f'"{identifier}"'  # Wrap in double quotes to escape
+
 
 
 def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
@@ -443,42 +439,31 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         if conn:
             conn.close()
 
-
-
-
 def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
     """
     Generates feedback based on query execution validation.
     """
     if not validation_result["execution_success"]:
-        return f"The query failed to execute. Error: {validation_result['error_message']}"
+        return f"The query failed to execute due to: {validation_result['error_message']}"
     
     feedback = []
     for issue in validation_result["potential_issues"]:
-        feedback.append(f"- {issue}")
-    
-    if validation_result["row_count"] == 0:
-        feedback.append("- The query returned no results. Consider relaxing conditions or checking table/column names.")
-    elif validation_result["row_count"] > 1000:
-        feedback.append("- The query returned a large number of rows. Consider adding more specific conditions.")
+        feedback.append(f"- Issue: {issue}")
     
     return "\n".join(feedback)
+
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict], all_columns: Dict[str, List[str]]) -> str:
     schema, _ = schema_cache.get_or_fetch_schema(db_path)
 
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
     Question: {question}
-
     Schema:
     {schema}
-
     Feedback:
     {feedback}
-
     Attempts history:
     {attempts_history}
-
     Improved SQL query (no explanations or comments, just SQL):
     """
 
@@ -640,8 +625,6 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     return prompt
 
 
-
-
 @backoff.on_exception(backoff.expo, openai.error.RateLimitError)
 
 def connect_gpt(engine, prompt, max_tokens, temperature, stop):
@@ -673,13 +656,14 @@ def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dic
         elif row_count > 1000:
             confidence -= 0.2
 
-        # Add condition to avoid division by zero
+        # Add partial credit for structurally valid queries
         if "is_valid" in analysis_result and analysis_result["is_valid"]:
             confidence += 0.2
 
         confidence -= 0.1 * len(validation_result.get("potential_issues", []))
     
     return max(0.0, min(confidence, 1.0))
+
 
 
 
@@ -848,4 +832,3 @@ if __name__ == '__main__':
     save_feedback(feedback_results, args.feedback_output_path)
 
     print(f'Successfully collected results from {args.engine} for {args.mode} evaluation.')
-
