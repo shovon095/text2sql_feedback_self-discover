@@ -10,6 +10,10 @@ import sqlparse
 from tqdm import tqdm
 import spacy
 import re
+import sqlparse
+from sqlparse.sql import IdentifierList, Identifier
+from sqlparse.tokens import Keyword, DML
+
 openai.debug = True
 import concurrent.futures
 import threading
@@ -118,6 +122,29 @@ class SchemaCache:
 
 schema_cache = SchemaCache()
 
+def is_subselect(parsed):
+    if not parsed.is_group:
+        return False
+    for item in parsed.tokens:
+        if item.ttype is DML and item.value.upper() == 'SELECT':
+            return True
+    return False
+
+def extract_identifiers(token_stream):
+    """Extract column and table identifiers from a parsed SQL query."""
+    identifiers = []
+    for item in token_stream:
+        if isinstance(item, IdentifierList):
+            for identifier in item.get_identifiers():
+                identifiers.append(identifier.get_real_name())
+        elif isinstance(item, Identifier):
+            identifiers.append(item.get_real_name())
+        elif item.ttype is Keyword:
+            continue
+        elif is_subselect(item):
+            identifiers.extend(extract_identifiers(item.tokens))
+    return identifiers
+
 def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
     issues = []
     parsed = sqlparse.parse(sql_query)[0]
@@ -126,19 +153,24 @@ def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str
     if parsed.get_type() != 'SELECT':
         issues.append("Query is not a SELECT statement")
     
-    # Check for proper JOIN conditions
-    if 'JOIN' in sql_query.upper() and 'ON' not in sql_query.upper():
-        issues.append("JOIN used without ON clause")
+    # Extract column and table identifiers
+    used_columns = extract_identifiers(parsed.tokens)
     
     # Check for existence of columns and tables
-    used_columns = re.findall(r'\b(\w+\.\w+|\w+)\b', sql_query)
     for col in used_columns:
         if '.' in col:
             table, column = col.split('.')
             if table not in all_columns or column not in all_columns[table]:
                 issues.append(f"Column {col} not found in schema")
-        elif col not in [item for sublist in all_columns.values() for item in sublist]:
-            issues.append(f"Column {col} not found in schema")
+        else:
+            # If the column isn't part of a table.column format, check all columns
+            found = False
+            for table, columns in all_columns.items():
+                if col in columns:
+                    found = True
+                    break
+            if not found:
+                issues.append(f"Column {col} not found in schema")
     
     return {
         "is_valid": len(issues) == 0,
