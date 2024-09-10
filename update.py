@@ -199,10 +199,10 @@ def escape_sql_identifier(identifier: str) -> str:
     """
     return f'"{identifier}"'  # Wrap in double quotes to escape
 
+
 def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
     """
-    Reads an SQLite file, returns the CREATE commands for each of the tables in the database,
-    and retrieves the list of columns in each table, with proper escaping of table and column names.
+    Fetch database schema and log it for debugging.
     """
     with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
         cursor = conn.cursor()
@@ -213,20 +213,18 @@ def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
 
         for table in tables:
             table_name = table[0]
-
-            # Escape the table name using the helper function
             table_name_escaped = escape_sql_identifier(table_name)
 
-            # Retrieve the CREATE statement for the table
             cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name={table_name_escaped}")
             schemas[table_name] = cursor.fetchone()[0]
 
-            # Get columns for the table using PRAGMA and escape table name
             cursor.execute(f"PRAGMA table_info({table_name_escaped})")
             columns = cursor.fetchall()
-            all_columns[table_name] = [escape_sql_identifier(col[1]) for col in columns]  # Escape column names
-
-    return schemas, all_columns
+            all_columns[table_name] = [escape_sql_identifier(col[1]) for col in columns]
+            
+        # Log the schema for debugging
+        print(f"Loaded schema: {schemas}")
+        return schemas, all_columns
 
 
 
@@ -350,19 +348,29 @@ def nice_look_table(column_names: list, values: list):
     final_output = header + '\n' + rows
     return final_output
 
-
 def escape_column_name(column_name: str) -> str:
+    """
+    Escapes column names with double quotes for SQLite.
+    Double quotes are used to handle spaces and special characters in column names.
+    """
+    # Avoid double-quoting if already escaped
     if not column_name.startswith('"') and not column_name.endswith('"'):
         return f'"{column_name}"'
     return column_name
 
-
 def escape_all_column_names(sql_query: str, all_columns: Dict[str, List[str]]) -> str:
-    tokens = re.split(r'(\W+)', sql_query)
-    all_columns_flat = {col for columns in all_columns.values() for col in columns}
-    escaped_tokens = [escape_column_name(token) if token in all_columns_flat else token for token in tokens]
-    escaped_sql_query = ''.join(escaped_tokens)
-    return escaped_sql_query
+    """
+    Escapes all column names in the given SQL query based on the provided schema.
+    :param sql_query: The SQL query string.
+    :param all_columns: Dictionary where keys are table names and values are lists of column names.
+    :return: The SQL query with all column names properly escaped.
+    """
+    for table, columns in all_columns.items():
+        for column in columns:
+            # Escape the column name only if it's not already escaped
+            if f'"{column}"' not in sql_query and f'`{column}`' not in sql_query:
+                sql_query = sql_query.replace(column, escape_column_name(column))
+    return sql_query
 
 
 def is_valid_sql(sql_query):
@@ -396,6 +404,7 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         
         # Escape all column names in the SQL query
         escaped_sql_query = escape_all_column_names(sql_query, all_columns)
+        cursor.execute(escaped_sql_query)
         
         print("Executing SQL query with adaptive timeout...")
         # Execute the SQL query with adaptive timeout
@@ -455,30 +464,28 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
     
     return "\n".join(feedback)
 
-
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict], all_columns: Dict[str, List[str]]) -> str:
     schema, _ = schema_cache.get_or_fetch_schema(db_path)
 
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
-
     Question: {question}
 
     Schema:
     {schema}
 
-    Previous attempt feedback:
+    Feedback:
     {feedback}
 
     Attempts history:
     {attempts_history}
 
-    Improved SQL query (no explanations or formatting):
+    Improved SQL query (no explanations or comments, just SQL):
     """
 
     response = openai.ChatCompletion.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations."},
+            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations or comments."},
             {"role": "user", "content": prompt_content}
         ],
         max_tokens=200,
@@ -486,15 +493,10 @@ def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, att
     )
 
     generated_sql = response['choices'][0]['message']['content'].strip()
-
-    # Clean the SQL query to remove markdown formatting
     cleaned_sql = clean_sql_query(generated_sql)
-
-    # Escape all column names in the cleaned SQL
     escaped_sql = escape_all_column_names(cleaned_sql, all_columns)
-
+    
     return escaped_sql
-
 
 
 def extract_entities_and_relationships(question: str):
@@ -659,30 +661,25 @@ def connect_gpt(engine, prompt, max_tokens, temperature, stop):
     except Exception as e:
         return f'error:{e}'
 
-
 def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dict[str, Any]) -> float:
     confidence = 0.0
     
-    # Execution success increases confidence
-    if validation_result.get("execution_success", False):
+    if validation_result.get("execution_success"):
         confidence += 0.5
-        
-        # Row count feedback
-        row_count = validation_result.get("row_count", 0)  # Use .get() to avoid KeyError
+
+        row_count = validation_result.get("row_count", 0)
         if 1 <= row_count <= 1000:
             confidence += 0.3
         elif row_count > 1000:
             confidence -= 0.2
-        
-        # No issues in query analysis
-        if analysis_result["is_valid"]:
+
+        # Add condition to avoid division by zero
+        if "is_valid" in analysis_result and analysis_result["is_valid"]:
             confidence += 0.2
-        
-        # Reduce confidence for each potential issue
-        confidence -= 0.05 * len(validation_result.get("potential_issues", []))  # Reduce confidence gradually
+
+        confidence -= 0.1 * len(validation_result.get("potential_issues", []))
     
     return max(0.0, min(confidence, 1.0))
-
 
 
 
