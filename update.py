@@ -46,6 +46,33 @@ def decouple_question_schema(datasets, db_root_path):
     
     return question_list, db_path_list, knowledge_list
 
+def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
+    issues = []
+    parsed = sqlparse.parse(sql_query)[0]
+    
+    used_columns = extract_identifiers(parsed.tokens)
+
+    # Check each used column against the actual schema
+    for col in used_columns:
+        if '.' in col:
+            table, column = col.split('.')
+            if table not in all_columns or column not in all_columns[table]:
+                issues.append(f"Column {col} not found in schema")
+        else:
+            found = False
+            for table, columns in all_columns.items():
+                if col in columns:
+                    found = True
+                    break
+            if not found:
+                issues.append(f"Column {col} not found in schema")
+    
+    return {
+        "is_valid": len(issues) == 0,
+        "issues": issues
+    }
+
+
 class SchemaCache:
     def __init__(self, cache_dir: str = "./schema_cache"):
         self.cache_dir = cache_dir
@@ -92,6 +119,28 @@ class SchemaCache:
 
 schema_cache = SchemaCache()
 
+def clean_sql_query(generated_sql: str) -> str:
+    """
+    Cleans the generated SQL query by removing duplicate SELECT statements,
+    unnecessary newlines, and ensuring proper capitalization.
+    """
+    # Remove any markdown-style code block markers
+    cleaned_sql = generated_sql.strip().replace("```sql", "").replace("```", "")
+    
+    # Remove any remaining backticks
+    cleaned_sql = cleaned_sql.replace("`", "")
+    
+    # Remove duplicate SELECT statements
+    cleaned_sql = re.sub(r'(?i)(\s*SELECT\s+)+', ' SELECT ', cleaned_sql)
+    
+    # Normalize whitespace
+    cleaned_sql = " ".join(cleaned_sql.split())
+    
+    # Ensure the query starts with SELECT
+    if not cleaned_sql.upper().startswith("SELECT"):
+        cleaned_sql = "SELECT " + cleaned_sql
+    
+    return cleaned_sql.strip()
 
 def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
     """
@@ -344,28 +393,23 @@ def generate_feedback_from_validation(validation_result: Dict[str, Any]) -> str:
 
 
 def regenerate_sql_with_feedback(question: str, db_path: str, feedback: str, attempts_history: List[Dict], all_columns: Dict[str, List[str]]) -> str:
-    # Use schema cache
     schema, _ = schema_cache.get_or_fetch_schema(db_path)
 
     prompt_content = f"""Given the following question, database schema, and feedback, generate an improved SQL query:
-
-Question: {question}
-
-Schema:
-{schema}
-
-Previous attempt feedback:
-{feedback}
-
-Attempts history:
-{attempts_history}
-
-Improved SQL query:"""
+    Question: {question}
+    Schema:
+    {schema}
+    Feedback:
+    {feedback}
+    Attempts history:
+    {attempts_history}
+    Improved SQL query (no explanations or comments, just SQL):
+    """
 
     response = openai.ChatCompletion.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that generates SQL queries."},
+            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations or comments."},
             {"role": "user", "content": prompt_content}
         ],
         max_tokens=200,
@@ -373,10 +417,9 @@ Improved SQL query:"""
     )
 
     generated_sql = response['choices'][0]['message']['content'].strip()
-
-    # Escape all column names in the generated SQL
-    escaped_sql = escape_all_column_names(generated_sql, all_columns)
-
+    cleaned_sql = clean_sql_query(generated_sql)
+    escaped_sql = escape_all_column_names(cleaned_sql, all_columns)
+    
     return escaped_sql
 
 
@@ -537,34 +580,25 @@ def connect_gpt(engine, prompt, max_tokens, temperature, stop):
         return f'error:{e}'
 
 
-def calculate_confidence(validation_result: Dict[str, Any]) -> float:
-    """
-    Calculate the confidence score of a generated SQL query based on validation feedback.
-    :param validation_result: The validation result from executing the SQL query.
-    :return: A confidence score between 0 and 1.
-    """
+def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dict[str, Any]) -> float:
     confidence = 0.0
-
-    # Execution success increases confidence
+    
     if validation_result.get("execution_success"):
         confidence += 0.5
 
-        # Row count feedback
         row_count = validation_result.get("row_count", 0)
-        if 1 <= row_count <= 100:  # Ideal range of rows returned
+        if 1 <= row_count <= 1000:
             confidence += 0.3
-        elif row_count > 1000:  # Too many rows
+        elif row_count > 1000:
             confidence -= 0.2
 
-        # Check for potential issues
-        potential_issues = validation_result.get("potential_issues", [])
-        if not potential_issues:  # No issues increases confidence
+        # Add partial credit for structurally valid queries
+        if "is_valid" in analysis_result and analysis_result["is_valid"]:
             confidence += 0.2
-        else:
-            # Reduce confidence for each potential issue
-            confidence -= 0.1 * len(potential_issues)
 
-    return max(0.0, min(confidence, 1.0))  # Ensure the confidence is within 0 to 1
+        confidence -= 0.1 * len(validation_result.get("potential_issues", []))
+    
+    return max(0.0, min(confidence, 1.0))
 
 
 def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None):
@@ -607,26 +641,40 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             if not sql.upper().startswith('SELECT'):
                 sql = f'SELECT {sql}'
 
-            # Validate the SQL query by executing it
-            validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
+            # Clean the SQL query to remove markdown-style code blocks
+            cleaned_sql = clean_sql_query(sql)
 
-            # Calculate confidence score
-            confidence_score = calculate_confidence(validation_result)
+            # Analyze the query before validation
+            analysis_result = analyze_query(cleaned_sql, all_columns)
+
+            # Validate the cleaned SQL query by executing it
+            validation_result = execute_and_validate_query(db_path_list[i], cleaned_sql, question, all_columns)
+
+            # Calculate confidence score based on both validation and analysis results
+            confidence_score = calculate_confidence(validation_result, analysis_result)
 
             # Generate feedback if the query was not successful
             if not validation_result["execution_success"]:
                 feedback = generate_feedback_from_validation(validation_result)
                 
                 # Attempt to regenerate the SQL query with feedback
-                sql = regenerate_sql_with_feedback(question, db_path_list[i], feedback, attempts_history, all_columns)
-                
-                # Validate the regenerated query
-                validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
-                confidence_score = calculate_confidence(validation_result)
+                regenerated_sql = regenerate_sql_with_feedback(question, db_path_list[i], feedback, attempts_history, all_columns)
+
+                # Clean the regenerated SQL query
+                cleaned_regenerated_sql = clean_sql_query(regenerated_sql)
+
+                # Validate the cleaned regenerated query
+                validation_result = execute_and_validate_query(db_path_list[i], cleaned_regenerated_sql, question, all_columns)
+
+                # Analyze the regenerated SQL query
+                analysis_result = analyze_query(cleaned_regenerated_sql, all_columns)
+
+                # Calculate the confidence score again based on the new analysis
+                confidence_score = calculate_confidence(validation_result, analysis_result)
 
             # Save the attempt details in the history
             attempts_history.append({
-                "generated_sql": sql,
+                "generated_sql": cleaned_sql,
                 "is_successful": validation_result["execution_success"],
                 "feedback": validation_result.get("potential_issues", []),
                 "confidence_score": confidence_score
@@ -635,16 +683,16 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             # Update the best SQL query based on confidence
             if confidence_score > best_confidence_score:
                 best_confidence_score = confidence_score
-                best_sql_query = sql
+                best_sql_query = cleaned_sql
 
             # Check if the query is successful and meets the confidence threshold
-            if validation_result["execution_success"] and confidence_score >= 0.7:
+            if validation_result["execution_success"] and confidence_score >= 0.5:
                 is_successful = True
 
             attempt += 1
 
         # Save the final best SQL query with the highest confidence
-        response_list.append(best_sql_query if best_sql_query else sql)
+        response_list.append(best_sql_query if best_sql_query else cleaned_sql)
 
         # Store the feedback results for this question
         feedback_results[i] = {
