@@ -718,11 +718,14 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             # Clean the SQL query to remove markdown-style code blocks
             cleaned_sql = clean_sql_query(sql)
 
+            # Analyze the query before validation
+            analysis_result = analyze_query(cleaned_sql, all_columns)
+
             # Validate the cleaned SQL query by executing it
             validation_result = execute_and_validate_query(db_path_list[i], cleaned_sql, question, all_columns)
 
-            # Calculate confidence score
-            confidence_score = calculate_confidence(validation_result)
+            # Calculate confidence score based on both validation and analysis results
+            confidence_score = calculate_confidence(validation_result, analysis_result)
 
             # Generate feedback if the query was not successful
             if not validation_result["execution_success"]:
@@ -736,7 +739,12 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
 
                 # Validate the cleaned regenerated query
                 validation_result = execute_and_validate_query(db_path_list[i], cleaned_regenerated_sql, question, all_columns)
-                confidence_score = calculate_confidence(validation_result)
+
+                # Analyze the regenerated SQL query
+                analysis_result = analyze_query(cleaned_regenerated_sql, all_columns)
+
+                # Calculate the confidence score again based on the new analysis
+                confidence_score = calculate_confidence(validation_result, analysis_result)
 
             # Save the attempt details in the history
             attempts_history.append({
