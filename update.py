@@ -390,7 +390,8 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
             return {
                 "execution_success": False,
                 "error_message": "Invalid query structure",
-                "potential_issues": analysis_result["issues"]
+                "potential_issues": analysis_result["issues"],
+                "row_count": 0  # Default row_count in case of invalid structure
             }
         
         # Escape all column names in the SQL query
@@ -401,10 +402,12 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         results = execute_with_adaptive_timeout(cursor, escaped_sql_query)
         print("SQL query executed successfully")
         
+        # Check if results are None
         if results is None:
             return {
                 "execution_success": False,
-                "error_message": "SQL query returned no results."
+                "error_message": "SQL query returned no results.",
+                "row_count": 0  # Ensure row_count is present even on failure
             }
         
         # Get column names from the query result
@@ -412,7 +415,7 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         
         return {
             "execution_success": True,
-            "row_count": len(results),
+            "row_count": len(results),  # Add row_count based on the number of returned rows
             "column_count": len(column_names),
             "sample_data": results[:5] if results else [],
             "column_names": column_names,
@@ -424,11 +427,13 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
         return {
             "execution_success": False,
             "error_message": f"SQLite Error: {str(e)}",
-            "potential_issues": [f"SQLite Error: {str(e)}"]
+            "potential_issues": [f"SQLite Error: {str(e)}"],
+            "row_count": 0  # Always include row_count to avoid KeyError
         }
     finally:
         if conn:
             conn.close()
+
 
 
 
@@ -659,24 +664,25 @@ def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dic
     confidence = 0.0
     
     # Execution success increases confidence
-    if validation_result["execution_success"]:
-        confidence += 0.6  # Execution success provides the highest boost
-    
-    # Row count feedback
-    row_count = validation_result["row_count"]
-    if 1 <= row_count <= 1000:
-        confidence += 0.2
-    elif row_count > 1000:
-        confidence -= 0.1
-    
-    # No issues in query analysis
-    if analysis_result["is_valid"]:
-        confidence += 0.2
-    
-    # Reduce confidence for each potential issue
-    confidence -= 0.05 * len(validation_result["potential_issues"])  # Reduce confidence gradually
+    if validation_result.get("execution_success", False):
+        confidence += 0.5
+        
+        # Row count feedback
+        row_count = validation_result.get("row_count", 0)  # Use .get() to avoid KeyError
+        if 1 <= row_count <= 1000:
+            confidence += 0.3
+        elif row_count > 1000:
+            confidence -= 0.2
+        
+        # No issues in query analysis
+        if analysis_result["is_valid"]:
+            confidence += 0.2
+        
+        # Reduce confidence for each potential issue
+        confidence -= 0.05 * len(validation_result.get("potential_issues", []))  # Reduce confidence gradually
     
     return max(0.0, min(confidence, 1.0))
+
 
 
 
