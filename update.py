@@ -9,9 +9,10 @@ import backoff
 import sqlparse
 from tqdm import tqdm
 import spacy
-
+import re
 openai.debug = True
-
+import concurrent.futures
+import threading
 # Initialize SpaCy NLP model
 nlp = spacy.load("en_core_web_sm")
 
@@ -33,6 +34,31 @@ def knowledge_package(data_json, knowledge=False):
         knowledge_list.append(data['evidence'])
 
     return knowledge_list
+
+def clean_sql_query(generated_sql: str) -> str:
+    """
+    Cleans the generated SQL query by removing duplicate SELECT statements,
+    unnecessary newlines, and ensuring proper capitalization.
+    """
+    # Remove any markdown-style code block markers
+    cleaned_sql = generated_sql.strip().replace("```sql", "").replace("```", "")
+    
+    # Remove any remaining backticks
+    cleaned_sql = cleaned_sql.replace("`", "")
+    
+    # Remove duplicate SELECT statements
+    cleaned_sql = re.sub(r'(?i)(\s*SELECT\s+)+', ' SELECT ', cleaned_sql)
+    
+    # Normalize whitespace
+    cleaned_sql = " ".join(cleaned_sql.split())
+    
+    # Ensure the query starts with SELECT
+    if not cleaned_sql.upper().startswith("SELECT"):
+        cleaned_sql = "SELECT " + cleaned_sql
+    
+    return cleaned_sql.strip()
+
+
 
 def decouple_question_schema(datasets, db_root_path):
     question_list = []
@@ -92,11 +118,59 @@ class SchemaCache:
 
 schema_cache = SchemaCache()
 
+def analyze_query(sql_query: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
+    issues = []
+    parsed = sqlparse.parse(sql_query)[0]
+    
+    # Check if it's a SELECT query
+    if parsed.get_type() != 'SELECT':
+        issues.append("Query is not a SELECT statement")
+    
+    # Check for proper JOIN conditions
+    if 'JOIN' in sql_query.upper() and 'ON' not in sql_query.upper():
+        issues.append("JOIN used without ON clause")
+    
+    # Check for existence of columns and tables
+    used_columns = re.findall(r'\b(\w+\.\w+|\w+)\b', sql_query)
+    for col in used_columns:
+        if '.' in col:
+            table, column = col.split('.')
+            if table not in all_columns or column not in all_columns[table]:
+                issues.append(f"Column {col} not found in schema")
+        elif col not in [item for sublist in all_columns.values() for item in sublist]:
+            issues.append(f"Column {col} not found in schema")
+    
+    return {
+        "is_valid": len(issues) == 0,
+        "issues": issues
+    }
+
+def execute_with_adaptive_timeout(cursor, query, initial_timeout=5, max_timeout=30):
+    timeout = initial_timeout
+    while timeout <= max_timeout:
+        try:
+            cursor.execute(f"pragma query_timeout={timeout * 1000}")
+            return cursor.execute(query).fetchall()
+        except sqlite3.OperationalError as e:
+            if "interrupted" in str(e).lower():
+                timeout *= 2
+            else:
+                raise
+    raise TimeoutError(f"Query execution exceeded maximum timeout of {max_timeout} seconds")
+
+
+
+def escape_sql_identifier(identifier: str) -> str:
+    """
+    Escapes SQL identifiers (e.g., table names, column names) by wrapping them in double quotes.
+    This prevents issues when reserved keywords are used as identifiers.
+    """
+    return f'"{identifier}"'  # Wrap in double quotes to escape
 
 def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
     """
-    Read an sqlite file, and return the CREATE commands for each of the tables in the database
-    as well as the list of columns in each table.
+    Reads an SQLite file, returns the CREATE commands for each of the tables in the database,
+    and retrieves the list of columns in each table, with proper escaping of table and column names.
     """
     with sqlite3.connect(f'file:{db_path}?mode=ro', uri=True) as conn:
         cursor = conn.cursor()
@@ -104,15 +178,24 @@ def get_db_schemas(db_path: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
         tables = cursor.fetchall()
         schemas = {}
         all_columns = {}
+
         for table in tables:
-            cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table[0]}'")
-            schemas[table[0]] = cursor.fetchone()[0]
-            # Get columns for the table
-            cursor.execute(f"PRAGMA table_info({table[0]})")
+            table_name = table[0]
+
+            # Escape the table name using the helper function
+            table_name_escaped = escape_sql_identifier(table_name)
+
+            # Retrieve the CREATE statement for the table
+            cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name={table_name_escaped}")
+            schemas[table_name] = cursor.fetchone()[0]
+
+            # Get columns for the table using PRAGMA and escape table name
+            cursor.execute(f"PRAGMA table_info({table_name_escaped})")
             columns = cursor.fetchall()
-            all_columns[table[0]] = [col[1] for col in columns]  # Extract column names from pragma info
+            all_columns[table_name] = [escape_sql_identifier(col[1]) for col in columns]  # Escape column names
 
     return schemas, all_columns
+
 
 
 def generate_schema_prompt(db_path, relevant_tables=None, relevant_columns=None, attention_weights=None, num_rows=None):
@@ -189,15 +272,18 @@ def detailed_self_discovery_guide():
     ]
     return '\n'.join(steps)
 
-def generate_sql_file(sql_lst, output_path=None):
+def generate_sql_file(sql_lst, db_path_list, output_path=None):
     result = {}
     for i, sql in enumerate(sql_lst):
-        result[i] = sql
+        db_id = db_path_list[i].split('/')[-1].split('.sqlite')[0]
+        sql_with_db_id = sql + f'\t----- bird -----\t{db_id}'
+        result[i] = sql_with_db_id  # Save the SQL query with db_id
     if output_path:
         directory_path = os.path.dirname(output_path)
         new_directory(directory_path)
         json.dump(result, open(output_path, 'w'), indent=4)
     return result
+
 
 def generate_comment_prompt(question, knowledge=None):
     """
@@ -234,63 +320,71 @@ def nice_look_table(column_names: list, values: list):
 
 
 def escape_column_name(column_name: str) -> str:
-    """
-    Escapes column names with double quotes for SQLite.
-    Double quotes are used as they are the SQL standard for identifier quoting.
-    """
-    # Check if the column is already escaped (either with double quotes or backticks)
-    if not (column_name.startswith('"') and column_name.endswith('"')) and not (column_name.startswith('`') and column_name.endswith('`')):
+    if not column_name.startswith('"') and not column_name.endswith('"'):
         return f'"{column_name}"'
     return column_name
 
+
 def escape_all_column_names(sql_query: str, all_columns: Dict[str, List[str]]) -> str:
-    """
-    Escapes all column names in the given SQL query using exact matching.
-    
-    :param sql_query: The SQL query string
-    :param all_columns: A dictionary where keys are table names and values are lists of column names
-    :return: The SQL query with all column names properly escaped
-    """
-    # Tokenize the query by splitting on spaces and punctuation to avoid partial matches
-    words = re.split(r'(\W+)', sql_query)  # Split by non-word characters while keeping them in the result
-
-    # Flatten the list of all column names from all tables
-    column_names = {col for columns in all_columns.values() for col in columns}
-
-    # Escape the column names that are in the list of columns
-    escaped_words = [escape_column_name(word) if word in column_names else word for word in words]
-
-    # Rejoin the tokenized query back into a single string
-    return ''.join(escaped_words)
-
+    tokens = re.split(r'(\W+)', sql_query)
+    all_columns_flat = {col for columns in all_columns.values() for col in columns}
+    escaped_tokens = [escape_column_name(token) if token in all_columns_flat else token for token in tokens]
+    escaped_sql_query = ''.join(escaped_tokens)
+    return escaped_sql_query
 
 def is_valid_sql(sql_query):
     try:
         parsed = sqlparse.parse(sql_query)
-        return len(parsed) > 0 and parsed[0].get_type() == 'SELECT'
-    except:
-        return False
+        if len(parsed) > 0 and parsed[0].get_type() == 'SELECT':
+            return True, None  # Valid SQL, no error message
+        else:
+            return False, "SQL query does not start with a valid SELECT statement."
+    except Exception as e:
+        return False, str(e)  # Return the exception message as the error
 
 def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_columns: Dict[str, List[str]]) -> Dict[str, Any]:
-    if not is_valid_sql(sql_query):
-        return {
-            "execution_success": False,
-            "error_message": "Invalid SQL syntax"
-        }
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         cursor = conn.cursor()
-
-        # Fetch columns from cache
+        
+        # Fetch the schema (this should already be cached)
         _, all_columns = schema_cache.get_or_fetch_schema(db_path)
-
+        
+        # Analyze query before execution
+        analysis_result = analyze_query(sql_query, all_columns)
+        if not analysis_result["is_valid"]:
+            return {
+                "execution_success": False,
+                "error_message": "Invalid query structure",
+                "potential_issues": analysis_result["issues"]
+            }
+        
         # Escape all column names in the SQL query
         escaped_sql_query = escape_all_column_names(sql_query, all_columns)
-
-        cursor.execute(escaped_sql_query)
-        results = cursor.fetchall()
+        
+        print("Executing SQL query with adaptive timeout...")
+        # Execute the SQL query with adaptive timeout
+        results = execute_with_adaptive_timeout(cursor, escaped_sql_query)
+        print("SQL query executed successfully")
+        
+        # Check if results are None
+        if results is None:
+            return {
+                "execution_success": False,
+                "error_message": "SQL query returned no results. This might be due to an empty table or overly restrictive WHERE clause."
+            }
+        
+        # Check if cursor.description is None
+        if cursor.description is None:
+            return {
+                "execution_success": False,
+                "error_message": "SQL query returned no column information. This might indicate a DDL or DML statement instead of a SELECT query."
+            }
+        
+        # Get column names from the query result
         column_names = [description[0] for description in cursor.description]
-
+        
+        # Build the validation result dictionary
         validation_result = {
             "execution_success": True,
             "row_count": len(results),
@@ -299,25 +393,35 @@ def execute_and_validate_query(db_path: str, sql_query: str, question: str, all_
             "column_names": column_names,
             "potential_issues": []
         }
-
-        # Check for empty results
+        
+        # Perform additional checks
         if len(results) == 0:
-            validation_result["potential_issues"].append("Query returned no results")
-
-        # Check for excessive results
+            validation_result["potential_issues"].append("Query returned no results. Please verify the conditions in the WHERE clause and ensure data exists for the specified criteria.")
+        
         if len(results) > 1000:
-            validation_result["potential_issues"].append("Query returned an unusually large number of rows")
-
-        # Check if all columns are the same value (might indicate a mistake in JOIN conditions)
+            validation_result["potential_issues"].append(f"Query returned an unusually large number of rows ({len(results)}). Consider adding more specific filters or a LIMIT clause.")
+        
         if results and all(len(set(row)) == 1 for row in results):
-            validation_result["potential_issues"].append("All columns have the same value, possible JOIN issue")
-
+            validation_result["potential_issues"].append("All columns have the same value. This might indicate a JOIN issue or incorrect column selection.")
+        
+        # Calculate confidence score
+        validation_result["confidence_score"] = calculate_confidence(validation_result, analysis_result)
+        
         return validation_result
 
     except sqlite3.Error as e:
+        print(f"SQLite error occurred: {e}")
         return {
             "execution_success": False,
-            "error_message": str(e)
+            "error_message": f"SQLite Error: {str(e)}",
+            "potential_issues": [f"SQLite Error: {str(e)}"]
+        }
+    except Exception as e:
+        print(f"Execution error occurred: {e}")
+        return {
+            "execution_success": False,
+            "error_message": f"Execution Error: {str(e)}",
+            "potential_issues": [f"Execution Error: {str(e)}"]
         }
     finally:
         if conn:
@@ -363,9 +467,9 @@ Attempts history:
 Improved SQL query:"""
 
     response = openai.ChatCompletion.create(
-        model="gpt-4",
+        model="gpt-4o",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that generates SQL queries."},
+            {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations or comments."},
             {"role": "user", "content": prompt_content}
         ],
         max_tokens=200,
@@ -374,10 +478,14 @@ Improved SQL query:"""
 
     generated_sql = response['choices'][0]['message']['content'].strip()
 
-    # Escape all column names in the generated SQL
-    escaped_sql = escape_all_column_names(generated_sql, all_columns)
+    # Clean the SQL query to remove markdown formatting
+    cleaned_sql = clean_sql_query(generated_sql)
+
+    # Escape all column names in the cleaned SQL
+    escaped_sql = escape_all_column_names(cleaned_sql, all_columns)
 
     return escaped_sql
+
 
 
 def extract_entities_and_relationships(question: str):
@@ -501,8 +609,13 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     else:
         detailed_steps = detailed_self_discovery_guide() if difficulty in ['moderate', 'challenging'] else ""
 
-    final_instruction = "Write the SQL query to answer the question, prioritizing schema elements based on the attention weights provided."
+    # Strict instruction to only return SQL query
+    final_instruction = """
+    Generate only a valid SQL query that answers the question. Do not include any explanations, comments, or formatting. 
+    The output should be executable SQL code only.
+    """
 
+    # Construct the final prompt for GPT
     prompt = (
         f"{schema}\n\n"
         f"{comment_prompt}\n\n"
@@ -514,6 +627,7 @@ def generate_difficulty_based_prompt(db_path, question, knowledge=None, difficul
     )
 
     return prompt
+
 
 
 
@@ -537,34 +651,28 @@ def connect_gpt(engine, prompt, max_tokens, temperature, stop):
         return f'error:{e}'
 
 
-def calculate_confidence(validation_result: Dict[str, Any]) -> float:
-    """
-    Calculate the confidence score of a generated SQL query based on validation feedback.
-    :param validation_result: The validation result from executing the SQL query.
-    :return: A confidence score between 0 and 1.
-    """
+def calculate_confidence(validation_result: Dict[str, Any], analysis_result: Dict[str, Any]) -> float:
     confidence = 0.0
-
+    
     # Execution success increases confidence
-    if validation_result.get("execution_success"):
+    if validation_result["execution_success"]:
         confidence += 0.5
-
+        
         # Row count feedback
-        row_count = validation_result.get("row_count", 0)
-        if 1 <= row_count <= 100:  # Ideal range of rows returned
+        row_count = validation_result["row_count"]
+        if 1 <= row_count <= 1000:
             confidence += 0.3
-        elif row_count > 1000:  # Too many rows
+        elif row_count > 1000:
             confidence -= 0.2
-
-        # Check for potential issues
-        potential_issues = validation_result.get("potential_issues", [])
-        if not potential_issues:  # No issues increases confidence
+        
+        # No issues in query analysis
+        if analysis_result["is_valid"]:
             confidence += 0.2
-        else:
-            # Reduce confidence for each potential issue
-            confidence -= 0.1 * len(potential_issues)
-
-    return max(0.0, min(confidence, 1.0))  # Ensure the confidence is within 0 to 1
+        
+        # Reduce confidence for each potential issue
+        confidence -= 0.1 * len(validation_result["potential_issues"])
+    
+    return max(0.0, min(confidence, 1.0))
 
 
 def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, engine, knowledge_list=None):
@@ -607,8 +715,11 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             if not sql.upper().startswith('SELECT'):
                 sql = f'SELECT {sql}'
 
-            # Validate the SQL query by executing it
-            validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
+            # Clean the SQL query to remove markdown-style code blocks
+            cleaned_sql = clean_sql_query(sql)
+
+            # Validate the cleaned SQL query by executing it
+            validation_result = execute_and_validate_query(db_path_list[i], cleaned_sql, question, all_columns)
 
             # Calculate confidence score
             confidence_score = calculate_confidence(validation_result)
@@ -618,15 +729,18 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
                 feedback = generate_feedback_from_validation(validation_result)
                 
                 # Attempt to regenerate the SQL query with feedback
-                sql = regenerate_sql_with_feedback(question, db_path_list[i], feedback, attempts_history, all_columns)
-                
-                # Validate the regenerated query
-                validation_result = execute_and_validate_query(db_path_list[i], sql, question, all_columns)
+                regenerated_sql = regenerate_sql_with_feedback(question, db_path_list[i], feedback, attempts_history, all_columns)
+
+                # Clean the regenerated SQL query
+                cleaned_regenerated_sql = clean_sql_query(regenerated_sql)
+
+                # Validate the cleaned regenerated query
+                validation_result = execute_and_validate_query(db_path_list[i], cleaned_regenerated_sql, question, all_columns)
                 confidence_score = calculate_confidence(validation_result)
 
             # Save the attempt details in the history
             attempts_history.append({
-                "generated_sql": sql,
+                "generated_sql": cleaned_sql,
                 "is_successful": validation_result["execution_success"],
                 "feedback": validation_result.get("potential_issues", []),
                 "confidence_score": confidence_score
@@ -635,16 +749,16 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
             # Update the best SQL query based on confidence
             if confidence_score > best_confidence_score:
                 best_confidence_score = confidence_score
-                best_sql_query = sql
+                best_sql_query = cleaned_sql
 
             # Check if the query is successful and meets the confidence threshold
-            if validation_result["execution_success"] and confidence_score >= 0.7:
+            if validation_result["execution_success"] and confidence_score >= 0.5:
                 is_successful = True
 
             attempt += 1
 
         # Save the final best SQL query with the highest confidence
-        response_list.append(best_sql_query if best_sql_query else sql)
+        response_list.append(best_sql_query if best_sql_query else cleaned_sql)
 
         # Store the feedback results for this question
         feedback_results[i] = {
@@ -656,6 +770,7 @@ def collect_response_from_gpt_with_retry(db_path_list, question_list, api_key, e
         }
 
     return response_list, feedback_results
+
 
 
 def save_feedback(feedback_results, feedback_output_path):
@@ -712,8 +827,7 @@ if __name__ == '__main__':
 
     # Save SQL queries
     output_name = args.data_output_path + 'predict_' + args.mode + '.json'
-    generate_sql_file(sql_lst=responses, output_path=output_name)
-
+    generate_sql_file(sql_lst=responses, db_path_list=db_path_list, output_path=output_name)
     # Save feedback results if feedback_output_path is provided
     save_feedback(feedback_results, args.feedback_output_path)
 
