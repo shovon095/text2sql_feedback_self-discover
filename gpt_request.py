@@ -157,20 +157,12 @@ def quota_giveup(e):
     interval=20
 )
 def connect_gpt(engine, prompt, max_tokens, temperature, stop):
+    # print(prompt)
     try:
-        # Call OpenAI's ChatCompletion.create() directly
-        result = openai.ChatCompletion.create(
-            model=engine,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": "You are an SQL expert. Respond only with valid SQL queries, no explanations."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=temperature,
-            stop=stop  # Ensure stop is a list of strings
-        )
-        return result
-    
+        result = openai.Completion.create(engine=engine, prompt=prompt, max_tokens=max_tokens, temperature=temperature, stop=stop)
+    except Exception as e:
+        result = 'error:{}'.format(e)
+    return result
 def collect_response_from_gpt(db_path_list, question_list, api_key, engine, knowledge_list=None):
     '''
     :param db_path: str
@@ -197,7 +189,7 @@ def collect_response_from_gpt(db_path_list, question_list, api_key, engine, know
         if type(plain_result) == str:
             sql = plain_result
         else:
-            sql = 'SELECT' + plain_result['choices'][0]['message']['content']
+            sql = 'SELECT' + plain_result['choices'][0]['text']
         
         # responses_dict[i] = sql
         db_id = db_path_list[i].split('/')[-1].split('.sqlite')[0]
