@@ -29,17 +29,16 @@ def new_directory(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-def generate_sql_file(sql_lst: List[str], output_path: str = None):
+def generate_sql_file(sql_lst: List[str], output_file: str):
     result = {}
     for i, sql in enumerate(sql_lst):
         result[i] = sql
-    
-    if output_path:
-        directory_path = os.path.dirname(output_path)
-        new_directory(directory_path)
-        with open(output_path, 'w') as f:
-            json.dump(result, f, indent=4)
-    
+
+    # Save SQL to the output directory
+    new_directory(os.path.dirname(output_file))
+    with open(output_file, 'w') as f:
+        json.dump(result, f, indent=4)
+
     return result
 
 def tokenize_function(examples):
@@ -58,7 +57,6 @@ def main():
     parser.add_argument('--db_root_path', type=str, required=True)
     parser.add_argument('--model_name_or_path', type=str, required=True)
     parser.add_argument('--output_dir', type=str, required=True)
-    parser.add_argument('--data_output_path', type=str, required=True)
     parser.add_argument('--num_train_epochs', type=int, default=3)
     parser.add_argument('--per_device_train_batch_size', type=int, default=4)
     parser.add_argument('--per_device_eval_batch_size', type=int, default=4)
@@ -123,9 +121,9 @@ def main():
         sql = sql + f'\t----- bird -----\t{db_id}'
         final_predictions.append(sql)
 
-    # Save predictions
-    output_name = os.path.join(args.data_output_path, f'predict_{args.mode}.json')
-    generate_sql_file(sql_lst=final_predictions, output_path=output_name)
+    # Save predictions to the output directory
+    output_name = os.path.join(args.output_dir, f'predict_{args.mode}.json')
+    generate_sql_file(sql_lst=final_predictions, output_file=output_name)
 
     logger.info(f'Successfully collected results for {args.mode} evaluation')
 
