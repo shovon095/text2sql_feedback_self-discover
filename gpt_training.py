@@ -132,4 +132,4 @@ train_file = 'train.json'
 training_data = load_training_data(train_file)
 
 # Fine-tune the model with RAG and attention weighting
-fine_tune_rag_attention(api_key, training_data, db_folder, engine="gpt-4", epochs=3)
+fine_tune_rag_attention(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
