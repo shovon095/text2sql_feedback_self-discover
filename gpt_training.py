@@ -6,10 +6,14 @@ import torch.nn as nn
 import os
 import backoff
 from tqdm import tqdm
-from transformers import GPT2Tokenizer
+from transformers import GPT2Tokenizer  # Tokenizer is used only for local tokenization, GPT-4-O Mini is accessed via API
 
-# Initialize the tokenizer (GPT-2 tokenizer is used here as an example, adjust based on GPT-4-O Mini)
+# Initialize the tokenizer (GPT-2 tokenizer is used for preprocessing)
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+
+# Add a padding token if it's missing
+if tokenizer.pad_token is None:
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 # Function to load training data from the JSON file
 def load_training_data(train_file):
@@ -124,7 +128,7 @@ def fine_tune_with_cot_and_complexity(api_key, train_data, db_folder, engine, ep
             -- SQL:
             """
 
-            # Call OpenAI API to generate SQL with Chain of Thought prompting
+            # Call GPT-4-O Mini API to generate SQL with Chain of Thought prompting
             @backoff.on_exception(backoff.expo, openai.error.OpenAIError, max_tries=5)
             def call_openai(prompt):
                 response = openai.ChatCompletion.create(
@@ -139,23 +143,28 @@ def fine_tune_with_cot_and_complexity(api_key, train_data, db_folder, engine, ep
                 )
                 return response
 
-            # Get the model's generated SQL from ChatCompletion
+            # Get the model's generated SQL from the API
             response = call_openai(prompt)
             generated_sql = response['choices'][0]['message']['content'].strip()
 
             # Tokenize the generated SQL
-            input_tokens = tokenizer(generated_sql, return_tensors='pt', padding=True, truncation=True)
-            logits = input_tokens.input_ids  # In this context, treat input tokens as "logits" for comparison
+            input_tokens = tokenizer(generated_sql, return_tensors='pt', padding=True, truncation=True).input_ids.to(torch.float32)
 
             # Tokenize the ground truth SQL (Target)
-            target_tokens = tokenizer(correct_sql, return_tensors='pt', padding=True, truncation=True)
-            target = target_tokens.input_ids
+            target_tokens = tokenizer(correct_sql, return_tensors='pt', padding=True, truncation=True).input_ids.to(torch.int64)
+
+            # Flatten the logits and target to match the shape for CrossEntropyLoss
+            logits = input_tokens.view(-1, input_tokens.size(-1))
+            target = target_tokens.view(-1)
+
+            # Ensure that the shapes match
+            assert logits.size(0) == target.size(0), f"Logits and target size mismatch: {logits.size(0)} vs {target.size(0)}"
 
             # Calculate complexity weight based on SQL length and conditions
             complexity_weight = calculate_complexity_weight(correct_sql)
 
             # Use the custom loss function
-            loss = loss_fn(logits, target, torch.tensor([complexity_weight]))
+            loss = loss_fn(logits, target, torch.tensor([complexity_weight], dtype=torch.float32))
 
             # Print progress
             print(f"Processed example {i+1}/{len(train_data)} - Loss: {loss.item()}")
@@ -164,7 +173,6 @@ def fine_tune_with_cot_and_complexity(api_key, train_data, db_folder, engine, ep
             feedback = give_feedback(generated_sql, correct_sql)
             if feedback:
                 print(feedback)
-                # Optionally log this for future fine-tuning or retraining
 
 # Example usage
 api_key = "your_openai_api_key"
@@ -176,3 +184,4 @@ training_data = load_training_data(train_file)
 
 # Fine-tune the model with RAG, CoT prompting, and complexity-based weights
 fine_tune_with_cot_and_complexity(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
+
