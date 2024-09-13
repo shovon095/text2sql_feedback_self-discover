@@ -45,17 +45,39 @@ def retrieve_context(db_path, question):
     # Combine all retrieved context into a single string
     return "\n".join(context)
 
-# Custom loss function with attention weighting based on SQL difficulty
+# Custom loss function with attention weighting based on SQL complexity
 class WeightedLoss(nn.Module):
     def __init__(self):
         super(WeightedLoss, self).__init__()
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def forward(self, logits, target, difficulty_weights):
+    def forward(self, logits, target, complexity_weights):
         # Apply the weighting to each example in the batch
         loss = self.loss_fn(logits, target)
-        weighted_loss = loss * difficulty_weights
+        weighted_loss = loss * complexity_weights
         return weighted_loss.mean()
+
+# Function to calculate complexity weight based on SQL length and presence of joins or other conditions
+def calculate_complexity_weight(sql):
+    base_weight = 1.0
+    # Calculate weight based on SQL length
+    sql_length = len(sql.split())
+    length_weight = sql_length / 100.0  # Example scaling, can be adjusted
+
+    # Check for the presence of JOIN, GROUP BY, HAVING, etc.
+    complexity_increase = 0.0
+    if 'JOIN' in sql:
+        complexity_increase += 1.0
+    if 'GROUP BY' in sql:
+        complexity_increase += 0.5
+    if 'HAVING' in sql:
+        complexity_increase += 0.5
+    if 'ORDER BY' in sql:
+        complexity_increase += 0.5
+    
+    # Final complexity weight
+    complexity_weight = base_weight + length_weight + complexity_increase
+    return complexity_weight
 
 # Function to provide feedback on incorrect SQL and log it
 def give_feedback(generated_sql, correct_sql):
@@ -65,15 +87,8 @@ def give_feedback(generated_sql, correct_sql):
     return feedback
 
 # Function to fine-tune GPT-4-O Mini with RAG-style context, CoT prompting, and feedback-based training
-def fine_tune_with_cot_and_feedback(api_key, train_data, db_folder, engine, epochs=3):
+def fine_tune_with_cot_and_complexity(api_key, train_data, db_folder, engine, epochs=3):
     openai.api_key = api_key
-
-    # Mapping SQL difficulty to weights
-    difficulty_map = {
-        'simple': 1.0,
-        'moderate': 1.5,
-        'hard': 2.0
-    }
 
     # Initialize custom loss function
     loss_fn = WeightedLoss()
@@ -83,14 +98,14 @@ def fine_tune_with_cot_and_feedback(api_key, train_data, db_folder, engine, epoc
         for i, example in tqdm(enumerate(train_data)):
             question = example['question']
             correct_sql = example['SQL']  # Ground truth SQL
-            difficulty = example['difficulty']
+            evidence = example['evidence']  # Evidence to explain query logic
             db_name = example['db_id']
             
             # Retrieve the corresponding database path and schema
             db_path = get_database_path(db_name, db_folder)
             schema_context = retrieve_context(db_path, question)
 
-            # Create Chain of Thought prompt with schema, question, and reasoning steps
+            # Create Chain of Thought prompt with schema, question, evidence, and reasoning steps
             prompt = f"""
             -- Schema:
             {schema_context}
@@ -98,9 +113,12 @@ def fine_tune_with_cot_and_feedback(api_key, train_data, db_folder, engine, epoc
             -- Question:
             {question}
 
+            -- Evidence:
+            {evidence}
+
             -- Let's think step by step:
             1. Identify the relevant tables and columns from the schema.
-            2. Filter the data based on the conditions in the question.
+            2. Use the evidence to clarify the relationships between the natural language and SQL query components.
             3. Generate the final SQL query based on the filtered data.
 
             -- SQL:
@@ -133,11 +151,11 @@ def fine_tune_with_cot_and_feedback(api_key, train_data, db_folder, engine, epoc
             target_tokens = tokenizer(correct_sql, return_tensors='pt', padding=True, truncation=True)
             target = target_tokens.input_ids
 
-            # Get difficulty weight for the current SQL
-            difficulty_weights = torch.tensor([difficulty_map[difficulty]])
+            # Calculate complexity weight based on SQL length and conditions
+            complexity_weight = calculate_complexity_weight(correct_sql)
 
             # Use the custom loss function
-            loss = loss_fn(logits, target, difficulty_weights)
+            loss = loss_fn(logits, target, torch.tensor([complexity_weight]))
 
             # Print progress
             print(f"Processed example {i+1}/{len(train_data)} - Loss: {loss.item()}")
@@ -156,6 +174,5 @@ train_file = 'train.json'
 # Load training data
 training_data = load_training_data(train_file)
 
-# Fine-tune the model with RAG, CoT prompting, and feedback-based training
-fine_tune_with_cot_and_feedback(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
-
+# Fine-tune the model with RAG, CoT prompting, and complexity-based weights
+fine_tune_with_cot_and_complexity(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
