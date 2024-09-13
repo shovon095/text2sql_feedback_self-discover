@@ -6,6 +6,10 @@ import torch.nn as nn
 import os
 import backoff
 from tqdm import tqdm
+from transformers import GPT2Tokenizer
+
+# Initialize the tokenizer (GPT-2 tokenizer is used here as an example, adjust based on GPT-4-O Mini)
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
 # Function to load training data from the JSON file
 def load_training_data(train_file):
@@ -19,10 +23,6 @@ def get_database_path(db_name, db_folder):
 
 # Function to retrieve schema context dynamically from the SQLite database (simulates RAG)
 def retrieve_context(db_path, question):
-    """
-    Retrieve relevant schema or contextual information for the query from a given database.
-    This simulates a RAG-style retrieval mechanism.
-    """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
@@ -52,18 +52,20 @@ class WeightedLoss(nn.Module):
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, logits, target, difficulty_weights):
-        """
-        logits: Model predictions
-        target: Ground truth labels
-        difficulty_weights: Pre-defined weights based on SQL difficulty
-        """
         # Apply the weighting to each example in the batch
         loss = self.loss_fn(logits, target)
         weighted_loss = loss * difficulty_weights
         return weighted_loss.mean()
 
-# Function to fine-tune GPT model with RAG-style context and weighted attention
-def fine_tune_rag_attention(api_key, train_data, db_folder, engine, epochs=3):
+# Function to provide feedback on incorrect SQL and log it
+def give_feedback(generated_sql, correct_sql):
+    feedback = ""
+    if generated_sql != correct_sql:
+        feedback = f"Your generated SQL: {generated_sql} was incorrect. Correct SQL: {correct_sql}."
+    return feedback
+
+# Function to fine-tune GPT-4-O Mini with RAG-style context, CoT prompting, and feedback-based training
+def fine_tune_with_cot_and_feedback(api_key, train_data, db_folder, engine, epochs=3):
     openai.api_key = api_key
 
     # Mapping SQL difficulty to weights
@@ -76,43 +78,60 @@ def fine_tune_rag_attention(api_key, train_data, db_folder, engine, epochs=3):
     # Initialize custom loss function
     loss_fn = WeightedLoss()
 
-    # Fine-tuning loop
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
         for i, example in tqdm(enumerate(train_data)):
             question = example['question']
-            sql = example['SQL']
+            correct_sql = example['SQL']  # Ground truth SQL
             difficulty = example['difficulty']
             db_name = example['db_id']
             
-            # Retrieve the corresponding database path
+            # Retrieve the corresponding database path and schema
             db_path = get_database_path(db_name, db_folder)
-
-            # Retrieve schema context dynamically using RAG
             schema_context = retrieve_context(db_path, question)
 
-            # Prepare prompt with schema and question
-            prompt = f"-- Schema:\n{schema_context}\n\n-- Question:\n{question}\n\n-- SQL:"
+            # Create Chain of Thought prompt with schema, question, and reasoning steps
+            prompt = f"""
+            -- Schema:
+            {schema_context}
 
-            # Fine-tune the model with backoff for handling API rate limits
+            -- Question:
+            {question}
+
+            -- Let's think step by step:
+            1. Identify the relevant tables and columns from the schema.
+            2. Filter the data based on the conditions in the question.
+            3. Generate the final SQL query based on the filtered data.
+
+            -- SQL:
+            """
+
+            # Call OpenAI API to generate SQL with Chain of Thought prompting
             @backoff.on_exception(backoff.expo, openai.error.OpenAIError, max_tries=5)
             def call_openai(prompt):
-                response = openai.Completion.create(
-                    engine=engine,
-                    prompt=prompt,
+                response = openai.ChatCompletion.create(
+                    model=engine,
+                    messages=[
+                        {"role": "system", "content": "You are an SQL expert. Respond with only valid SQL queries."},
+                        {"role": "user", "content": prompt}
+                    ],
                     max_tokens=150,
                     temperature=0.2,
                     stop=[";"]
                 )
                 return response
 
-            # Get the model's generated SQL
+            # Get the model's generated SQL from ChatCompletion
             response = call_openai(prompt)
-            generated_sql = response['choices'][0]['text'].strip()
+            generated_sql = response['choices'][0]['message']['content'].strip()
 
-            # Here we simulate model outputs for calculating loss using attention weighting
-            logits = torch.randn(4, 10)  # Dummy logits for demonstration
-            target = torch.tensor([1, 2, 3, 0])  # Ground truth labels
+            # Tokenize the generated SQL
+            input_tokens = tokenizer(generated_sql, return_tensors='pt', padding=True, truncation=True)
+            logits = input_tokens.input_ids  # In this context, treat input tokens as "logits" for comparison
+
+            # Tokenize the ground truth SQL (Target)
+            target_tokens = tokenizer(correct_sql, return_tensors='pt', padding=True, truncation=True)
+            target = target_tokens.input_ids
 
             # Get difficulty weight for the current SQL
             difficulty_weights = torch.tensor([difficulty_map[difficulty]])
@@ -123,6 +142,12 @@ def fine_tune_rag_attention(api_key, train_data, db_folder, engine, epochs=3):
             # Print progress
             print(f"Processed example {i+1}/{len(train_data)} - Loss: {loss.item()}")
 
+            # Provide feedback if SQL is incorrect
+            feedback = give_feedback(generated_sql, correct_sql)
+            if feedback:
+                print(feedback)
+                # Optionally log this for future fine-tuning or retraining
+
 # Example usage
 api_key = "your_openai_api_key"
 db_folder = "train_databases"
@@ -131,5 +156,6 @@ train_file = 'train.json'
 # Load training data
 training_data = load_training_data(train_file)
 
-# Fine-tune the model with RAG and attention weighting
-fine_tune_rag_attention(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
+# Fine-tune the model with RAG, CoT prompting, and feedback-based training
+fine_tune_with_cot_and_feedback(api_key, training_data, db_folder, engine="gpt-4o-mini", epochs=15)
+
